@@ -2,108 +2,104 @@ function [x_planned, y_planned, z_planned, yaw_planned] = mpc_racing_controller(
         x_err, y_err, phi, theta, psi, ...
         vx, vy, vz, p, q, r, takeoff_flag, ...
         x_est, y_est)
-%MPC_RACING_CONTROLLER  Racing-line POSITION planner (replaces Pure Pursuit).
-%  Outputs an absolute NED position reference pos_ref = [x_planned; y_planned;
-%  z_planned] (position mode, controlModePosVsOrient = 1) plus an optional
-%  heading command yaw_planned.
+%MPC_RACING_CONTROLLER  Line-following planner with a TRANSLATE/ROTATE supervisor.
+%  Position mode (controlModePosVsOrient = 1): outputs an absolute NED
+%  position reference [x_planned; y_planned; z_planned] (-> pos_ref) plus a
+%  heading command yaw_planned (-> orient_ref Parrot-yaw = element 1, after the
+%  Mux fix in Path Planning).
 %
-%  ── WHY THE DRONE USED TO STOP AT CORNERS ────────────────────────────────
-%   The previous law placed the set-point proportional to the pixel error:
-%       x_planned = x_est + K_TRACK*x_err
-%   On a corner the drone centres on the track so x_err,y_err -> 0, hence the
-%   set-point collapses onto the drone (x_planned ~= x_est) and it STOPS dead
-%   in the corner.  This version instead aims a FIXED look-ahead DISTANCE
-%   along the track bearing, so there is always forward progress, and it
-%   shortens that distance in sharp bends to brake into the corner.
+%  WHY (old law was one overloaded controller -> circled at corners):
+%    e_psi = filtered bearing to the look-ahead point  (= heading error)
+%    SUPERVISOR (hysteresis):
+%        |e_psi| > TH_HI  -> ROTATE   : hover & turn the nose onto the line
+%        |e_psi| < TH_LO  -> TRANSLATE: fly along the line
+%    v_along = V_MAX*(1 - |e_psi|/TH_FULL)  (slow into bends; 0 while rotating)
+%    yaw     = psi + YAW_GAIN*e_psi          (always aim nose at the line)
+%    pos_ref = pursuit point v_along ahead along the (proven) bearing
 %
-%  ── RACING BEHAVIOUR ──────────────────────────────────────────────────────
-%     straight (small |y_err|)   -> lookahead = L_MAX  -> FAST
-%     sharp bend (large |y_err|) -> lookahead = L_MIN  -> BRAKE
-%   The set-point is placed at that distance along the bearing to the track
-%   look-ahead point, so the drone flows through corners instead of stopping.
-%
-%  ── INPUTS ────────────────────────────────────────────────────────────────
-%   x_err,y_err  : longitudinal / lateral track pixel error (decision_making)
-%   phi,theta    : roll/pitch [rad]            (unused - interface only)
-%   psi          : yaw [rad]   (used for the body->NED look-ahead rotation)
-%   vx,vy,vz,p,q,r : body vel / rates          (unused - interface only)
-%   takeoff_flag : wired to [flag_activate_PP] - 1 = path planning active
-%                  (track), 0 = still taking off (hold)
-%   x_est,y_est  : current NED position estimate [m]
-%
-%  ── OUTPUTS ───────────────────────────────────────────────────────────────
-%   x_planned,y_planned,z_planned : NED position reference [m]  (-> pos_ref)
-%   yaw_planned                   : heading reference [rad]
-%                  (currently terminated; route to orient_ref(3) to enable
-%                   "nose into the corner".  YAW_GAIN = 0 keeps heading hold.)
+%  INPUTS : x_err,y_err longitudinal/lateral track pixel error; psi yaw [rad];
+%           takeoff_flag (1=track active); x_est,y_est NED position [m].
+%           (phi,theta,vx..r unused - interface only)
+%  OUTPUTS: x_planned,y_planned,z_planned NED ref [m]; yaw_planned [rad].
 
 %#codegen
-%#codegen
 
-% เก็บ bearing เฟรมก่อนหน้า (เอาไว้คำนวณว่าทิศเปลี่ยนเร็วแค่ไหน = ความโค้ง)
-persistent prev_bearing
-if isempty(prev_bearing); prev_bearing = 0.0; end
-% bearing ที่ smooth แล้ว สำหรับใช้ใน yaw (กัน vision noise วิ่งเข้า yaw command)
-persistent bearing_smooth
+% ── persistent filter / supervisor state ──────────────────────────────────
+persistent bearing_smooth   % EMA-filtered heading error [rad]
+persistent mode             % 0 = TRANSLATE, 1 = ROTATE-first
+persistent rot_count        % consecutive frames heading error has exceeded TH_HI
 if isempty(bearing_smooth); bearing_smooth = 0.0; end
+if isempty(mode);           mode           = 0.0; end
+if isempty(rot_count);      rot_count      = 0.0; end
 
-% ── Force all used inputs to double (state/vision buses are single) ───────
+% ── force used inputs to double (state/vision buses are single) ───────────
 x_err = double(x_err);   y_err = double(y_err);
 psi   = double(psi);
+vx    = double(vx);      vy    = double(vy);
 x_est = double(x_est);   y_est = double(y_est);
 takeoff_flag = double(takeoff_flag);
 
 % ── Tuneable parameters ───────────────────────────────────────────────────
-% ── Tuneable parameters ───────────────────────────────────────────────────
-L_MAX       = 0.15;   % look-ahead ทางตรง [m]   <<< SLOW MODE (เดิม 0.55) ช้าๆ ตามเส้นก่อน
-L_MIN       = 0.08;   % look-ahead/ความเร็วขั้นต่ำในโค้ง [m] (0.12->0.18 = โค้งเร็วขึ้น; =L_MAX คือไม่ชะลอเลย)
-BEARING_REF = 0.55;   % rad ~23°  จุดที่ "มุมโค้งปัจจุบัน" เบรกเต็ม (เล็ก = ไวต่อโค้ง)
-CURV_GAIN   = 0.2;    % น้ำหนัก "เบรกก่อนถึงโค้ง" (ช้าอยู่แล้ว เบรกเบาๆ พอ)
-ERR_MIN     = 2.5;    % px track-lost threshold
-Z_TRACK     = -1.1;   % ความสูง [m NED]
-YAW_GAIN    = 0.1;   % 0=hold; 0.4 -> ยังแกว่ง ±70°; 0.15 + EMA = นุ่ม
-YAW_ALPHA   = 0.18;   % EMA weight (เล็ก=smooth ขึ้น/หมุนช้าลง; ใหญ่=ไวขึ้น/noisy)
-YAW_DEAD    = 0.15;   % deadband ~6° (ไม่หมุนเมื่อ bearing เล็กกว่านี้ = vision noise)
+V_MAX     = 0.19;   % look-ahead dist / forward speed on a straight [m]
+YAW_GAIN  = 0.6;    % nose-to-line gain (yaw_ref = psi + YAW_GAIN*e_psi)
+YAW_ALPHA = 0.30;   % EMA weight on heading error (small = smoother / laggier)
+TH_HI     = 0.87;   % rad ~50 deg -> rotate ONLY on a sharp turn (was 35: rotated too eagerly)
+TH_LO     = 0.35;   % rad ~20 deg -> back to TRANSLATE (hysteresis)
+TH_FULL   = 1.40;   % rad ~80 deg -> keep more straight speed; slow less into bends
+ROT_DWELL = 8;      % must exceed TH_HI for this many frames -> CONFIRMED turn (prefer straight)
+K_DAMP    = 0.30;   % velocity damping -> more braking = less overshoot (was 0.15)
+ERR_MIN   = 2.5;    % px  track-lost threshold
+Z_TRACK   = -1.1;   % height [m NED]
 
 err_mag = hypot(x_err, y_err);
 
 if takeoff_flag && err_mag > ERR_MIN
-    % ── Bearing to the look-ahead track point (image/body frame) ──────────
-    bearing_body = atan2(y_err, x_err);
+    % heading error = bearing to the look-ahead point (body frame), filtered
+    bearing_body   = atan2(y_err, x_err);
+    bearing_smooth = (1.0 - YAW_ALPHA)*bearing_smooth + YAW_ALPHA*bearing_body;
+    e_abs          = abs(bearing_smooth);
 
-
-    % ── Speed / brake profile ─────────────────────────────────────────────
-        % ── Curvature-anticipatory brake ──────────────────────────────────────
-    % d_bear = ทิศเปลี่ยนไปเท่าไรจากเฟรมก่อน (atan2 กันค่ากระโดด ±pi)
-    d_bear       = atan2(sin(bearing_body - prev_bearing), cos(bearing_body - prev_bearing));
-    prev_bearing = bearing_body;
-    % corner = มุมโค้งตอนนี้ + อัตราที่โค้งกำลังหักขึ้น (= เบรกก่อนถึงโค้ง)
-    corner    = min( abs(bearing_body)/BEARING_REF + CURV_GAIN*abs(d_bear), 1.0 );
-    lookahead = L_MIN + (L_MAX - L_MIN) * (1.0 - corner);
-
-    % ── Place the set-point a look-ahead distance ahead, along the track ──
-    bearing_ned = psi + bearing_body;                    % body -> NED (psi = heading)
-    x_planned   = x_est + lookahead * cos(bearing_ned);
-    y_planned   = y_est + lookahead * sin(bearing_ned);
-
-    % ── Heading: aim the nose toward the look-ahead point ─────────────────
-    % NOTE: orient_ref convention ของ Parrot = [yaw, pitch, roll] (สลับ!)
-    % ใน Path Planning Mux ต้องวาง yaw_planned ที่ input 1 (ไม่ใช่ input 3)
-    if abs(bearing_body) < YAW_DEAD
-        bearing_use = 0.0;
+    % ── SUPERVISOR: prefer TRANSLATE; rotate only on a CONFIRMED sharp turn ─
+    % count consecutive frames heading error stays large (= a real bend, not
+    % vision noise) before committing to ROTATE -> "wait for the right moment".
+    if e_abs > TH_HI
+        rot_count = rot_count + 1.0;
     else
-        bearing_use = bearing_body - sign(bearing_body)*YAW_DEAD;
+        rot_count = 0.0;
     end
-    bearing_smooth = (1.0 - YAW_ALPHA)*bearing_smooth + YAW_ALPHA*bearing_use;
+    if rot_count >= ROT_DWELL
+        mode = 1.0;          % sustained sharp misalignment -> rotate the nose
+    elseif e_abs < TH_LO
+        mode = 0.0;          % aligned -> translate (default = go straight)
+        rot_count = 0.0;
+    end                      % in between: keep previous mode
+
+    % ── forward speed: 0 while rotating, else slow with misalignment ──────
+    if mode > 0.5
+        v_along = 0.0;
+    else
+        v_along = V_MAX * max(0.0, 1.0 - e_abs/TH_FULL);
+    end
+
+    % ── yaw: aim the nose toward the line (wrapped to [-pi, pi]) ───────────
     yaw_raw     = psi + YAW_GAIN * bearing_smooth;
-    yaw_planned = atan2(sin(yaw_raw), cos(yaw_raw));   % wrap [-pi, pi]
+    yaw_planned = atan2(sin(yaw_raw), cos(yaw_raw));
+
+    % ── position set-point: pursuit point v_along ahead, minus velocity
+    %     damping (aims slightly behind momentum -> brakes -> cuts overshoot) ─
+    vN = vx*cos(psi) - vy*sin(psi);     % body velocity -> NED
+    vE = vx*sin(psi) + vy*cos(psi);
+    bearing_ned = psi + bearing_body;
+    x_planned   = x_est + v_along*cos(bearing_ned) - K_DAMP*vN;
+    y_planned   = y_est + v_along*sin(bearing_ned) - K_DAMP*vE;
 else
-    % Taking off, or track lost -> hold current position & heading
-    x_planned     = x_est;
-    y_planned     = y_est;
-    yaw_planned   = psi;
-    bearing_smooth = 0.0;   % reset filter state กัน spike ตอน track กลับมา
-    prev_bearing   = 0.0;
+    % taking off / track lost -> hold pose, reset state (no spike on re-lock)
+    x_planned      = x_est;
+    y_planned      = y_est;
+    yaw_planned    = psi;
+    bearing_smooth = 0.0;
+    mode           = 0.0;
+    rot_count      = 0.0;
 end
 z_planned = Z_TRACK;
 

@@ -21,8 +21,8 @@ SQUARE_KERNEL = 8;
 
 FOV = 2.0;  %Field of view= 2*(pi/FOV) this is a portion of the circumference
 
-MIN_RADIUS_CROWN = 14;   % reverted from 14: a 14px ring was too short, so as soon
-MAX_RADIUS_CROWN = 15;   % as the drone drifted >15px off the line it went blind and
+MIN_RADIUS_CROWN = 19;   % reverted from 14: a 14px ring was too short, so as soon
+MAX_RADIUS_CROWN = 20;   % as the drone drifted >15px off the line it went blind and
                          % froze (track lost -> controller holds). 27/28 = known-good.
 
 FRAME_SIZE_HEIGHT = 120;
