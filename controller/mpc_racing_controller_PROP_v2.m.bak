@@ -1,0 +1,81 @@
+function [x_planned, y_planned, z_planned, thrust] = mpc_racing_controller( ...
+        x_err, y_err, phi, theta, psi, ...
+        vx, vy, vz, p, q, r, takeoff_flag, ...
+        x_est, y_est)
+%MPC_RACING_CONTROLLER  Model-predictive POSITION planner (drop-in for the
+%  original "Non linear Path Planner").  It outputs an absolute NED position
+%  reference pos_ref = [x_planned; y_planned; z_planned] that the existing,
+%  well-tuned inner position/attitude controller of the Parrot model drives
+%  the drone towards.  The control mode flag controlModePosVsOrient = 1
+%  (position mode) must stay selected.
+%
+%  ── WHY POSITION, NOT ATTITUDE ────────────────────────────────────────────
+%   The Path Planning subsystem feeds the CommandBus element `pos_ref`
+%   (3x1, single).  The original Pure Pursuit planner produced a desired
+%   NED position from the camera pixel error; the inner controller then does
+%   position → velocity → attitude → motor control and holds altitude.  This
+%   MPC planner keeps that contract but chooses the look-ahead set-point with
+%   a short velocity preview so the drone can cut the apex.
+%
+%  ── INPUTS ────────────────────────────────────────────────────────────────
+%   x_err, y_err  – longitudinal / lateral track pixel error (decision_making)
+%   phi,theta,psi – Euler angles [rad]            (currently unused – kept for
+%   vx,vy,vz      – body velocities [m/s]          future apex tuning / interface)
+%   p,q,r         – body rates [rad/s]             (unused, interface)
+%   takeoff_flag  – wired to [flag_activate_PP] (Take off Checker):
+%                   0 = still taking off  → hold XY,
+%                   1 = path planning active → track the lane
+%   x_est, y_est  – current NED position estimate [m]  (States.X_ned 1,2)
+%
+%  ── OUTPUTS ───────────────────────────────────────────────────────────────
+%   x_planned, y_planned, z_planned – NED position reference [m]  (→ pos_ref)
+%   thrust                          – unused (wired to a Terminator); altitude
+%                                     is handled by the inner controller.
+
+%#codegen
+
+% ── Force all inputs to double (state/vision buses are single) ────────────
+x_err = double(x_err);   y_err = double(y_err);
+psi   = double(psi);
+vx    = double(vx);      vy    = double(vy);
+x_est = double(x_est);   y_est = double(y_est);
+takeoff_flag = double(takeoff_flag);
+%#ok<*NASGU>  (phi,theta,vz,p,q,r accepted for interface compatibility)
+
+% ── Tuneable parameters ───────────────────────────────────────────────────
+K_TRACK   = 0.0038;   % pixel-error → NED metre offset (matches original GAIN_TRACK)
+K_APEX    = 0.00;     % velocity preview gain [s] for apex cutting (0 = safe baseline,
+                      %   raise gradually, e.g. 0.05–0.15, to cut corners earlier)
+Z_TRACK   = -1.1;     % tracking altitude [m, NED]  (negative = up ≈ 1.1 m height)
+OFFSET_LIM = 0.60;    % max look-ahead offset magnitude per axis [m]
+
+% ── Pixel error → forward/lateral position offset ─────────────────────────
+%   The crown-mask detector returns the track point relative to the drone CoG;
+%   x_err is the forward (NED-x) error, y_err the lateral (NED-y) error.
+%   Heading-hold keeps body ≈ NED, so no yaw rotation is applied (as in the
+%   original planner).  The velocity term adds a small predictive look-ahead.
+x_off = K_TRACK * x_err + K_APEX * vx;
+y_off = K_TRACK * y_err + K_APEX * vy;
+
+% ── Saturate the look-ahead offset ────────────────────────────────────────
+x_off = max(-OFFSET_LIM, min(OFFSET_LIM, x_off));
+y_off = max(-OFFSET_LIM, min(OFFSET_LIM, y_off));
+
+% ── Build the position reference ──────────────────────────────────────────
+if takeoff_flag
+    % Path planning ACTIVE (flag_activate_PP = 1) → follow the lane by
+    % placing the set-point a look-ahead offset ahead of the drone.
+    x_planned = x_est + x_off;
+    y_planned = y_est + y_off;
+else
+    % Still taking off (flag_activate_PP = 0) → hold current horizontal
+    % position while the controller's take-off logic does the climb.
+    x_planned = x_est;
+    y_planned = y_est;
+end
+z_planned = Z_TRACK;
+
+% Thrust output is not used in position mode (kept for port compatibility).
+thrust = 0.0;
+
+end

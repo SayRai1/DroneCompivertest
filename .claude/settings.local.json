@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__MATLAB__evaluate_matlab_code",
+      "Bash(ls -la \"/c/Users/Asus/Downloads/thrust.fig\" \"/c/Users/Asus/Downloads/x_err.fig\" 2>&1 | head -20)"
+    ]
+  }
+}
