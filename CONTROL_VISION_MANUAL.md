@@ -222,6 +222,55 @@ tau_yaw = P_yaw·(yaw_ref - yaw)   - D_yaw·r
 
 ---
 
+## 12. Controller variants — สลับใช้ตามต้องการ (2026-06-25)
+
+โฟลเดอร์ `controller/` มี 3 ไฟล์ — **ตัวที่รันคือ `mpc_racing_controller.m` เสมอ** (กฎ MATLAB เรียกตามชื่อไฟล์) → สลับโดย **rename**
+
+| ไฟล์ | คือ | เมื่อไหร่ใช้ |
+|------|------|-------------|
+| `mpc_racing_controller.m` (ปัจจุบัน) | **crab + bearing snap** (ตัวที่วิ่งได้เกือบรอบ ติดโค้งย้อน 180°) | baseline ใช้อยู่ |
+| `mpc_racing_controller_VEL.m` | **velocity-based anti-reverse** | ลองก่อน—ไม่หมุน ไม่กระตุก แค่ flip bearing เมื่อย้อน |
+| `mpc_racing_controller_YAW180.m` | **yaw-flip 180°** | ถ้า VEL ไม่พอ — สั่งหมุนหัวจริง |
+
+### Variant A — VEL (velocity-based)
+หลักการ: ใช้ทิศที่โดรนกำลังบินจริง (vx,vy) เป็น **"หน้า ground-truth"** — ถ้า bearing จากกล้องทำมุมกับ velocity > 90° = โดรนถูกลากย้อน → **flip bearing 180°** ในซอฟต์แวร์
+- ✅ ไม่หมุนหัวจริง (เหมือนเดิม), ไม่มี dynamics ใหม่
+- ⚠️ ต้องบินจริง vmag > V_MIN ก่อนถึง active (ตอน hover ไม่ทำงาน)
+
+knobs (ในไฟล์):
+- `V_MIN` 0.05 m/s — ความเร็วขั้นต่ำที่เริ่มใช้ velocity guard (ต่ำไป=noise กระตุก, สูงไป=ตอนช้าไม่ป้องกัน)
+- `TH_REV` π/2 (90°) — bearing ห่างจาก velocity เกินนี้ = ย้อน → flip
+
+### Variant B — YAW180 (yaw-flip)
+หลักการ: ตรวจเจอ `|bearing| > TH_FLIP` ค้าง `DWELL` เฟรม → เข้าโหมด **FLIPPING**: hover (v=0) + สั่ง yaw หมุน 180° → พอ `|yaw-yaw_goal| < TH_DONE` → กลับ crab ปกติ (ตอนนี้กล้องเห็น "ที่เคยอยู่หลัง" เป็นหน้า → bearing เล็ก)
+- ✅ แก้ขาด — โดรนหันหัวจริง กล้องเห็นทางใหม่
+- ⚠️ ใช้ yaw → ถ้าเคยมีปัญหา spin/tumble (ดู §11) อาจกลับมา ขึ้นกับ inner Yaw PD
+
+knobs:
+- `TH_FLIP` 150° — bearing เกินนี้ = สงสัย back-bend
+- `DWELL` 3 — ต้องค้างกี่เฟรมก่อน confirm
+- `TH_DONE` 15° — yaw ใกล้ goal แค่ไหน = หมุนเสร็จ
+
+### วิธีสลับ (rename)
+```powershell
+cd D:\sirapop\studi\drone\parrotMinidroneCompetition_HAM\controller
+
+# A: ลอง VEL
+Move-Item mpc_racing_controller.m mpc_racing_controller_CRAB.m
+Move-Item mpc_racing_controller_VEL.m mpc_racing_controller.m
+
+# กลับ baseline
+Move-Item mpc_racing_controller.m mpc_racing_controller_VEL.m
+Move-Item mpc_racing_controller_CRAB.m mpc_racing_controller.m
+```
+แล้ว `clear mpc_racing_controller` → Ctrl+D → Run
+
+### แนะนำลำดับลอง
+1. **VEL ก่อน** (ปลอดภัย ไม่หมุนจริง) → ถ้าผ่าน = จบ
+2. ถ้า VEL ไม่พอ → **YAW180** (แรงกว่า แต่กลับมาเสี่ยง spin)
+
+---
+
 ## 10. Backup / Revert
 โฟลเดอร์: `D:\sirapop\studi\drone\backup_parrotHAM_2026-06-23_branchpick\`
 
