@@ -19,7 +19,7 @@ BINARIZER_THRESHOLD = 100;
 
 SQUARE_KERNEL = 8;
 
-FOV = 2.0;  %Field of view= 2*(pi/FOV) this is a portion of the circumference
+FOV = 1.8;  %Field of view= 2*(pi/FOV) this is a portion of the circumference
 
 MIN_RADIUS_CROWN = 19;   % reverted from 14: a 14px ring was too short, so as soon
 MAX_RADIUS_CROWN = 20;   % as the drone drifted >15px off the line it went blind and

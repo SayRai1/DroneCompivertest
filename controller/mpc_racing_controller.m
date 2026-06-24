@@ -21,11 +21,11 @@ x_est = double(x_est);   y_est = double(y_est);
 takeoff_flag = double(takeoff_flag);
 
 % ── Tuneable parameters ───────────────────────────────────────────────────
-LOOKAHEAD = 0.10;   % straight set-point distance [m] (speed)
-L_SLOW    = 0.04;   % set-point distance at a corner [m] (ease onto the new arm)
-TH_SLOW   = deg2rad(25);   % rad ~34deg : guide bigger than this = a bend -> slow down
-B_ALPHA   = 0.25;   % guide low-pass weight (small = steadier, absorbs flips)
-ERR_MIN   = 2.4;    % px track-lost threshold
+LOOKAHEAD = 0.12;   % straight set-point distance [m] (speed)
+L_SLOW    = 0.11;   % set-point distance at a corner [m] (ease onto the new arm)
+TH_SLOW   = deg2rad(18);   % rad ~34deg : guide bigger than this = a bend -> slow down
+B_ALPHA   = 0.20;   % guide low-pass weight (small = steadier, absorbs flips)
+ERR_MIN   = 0.3;    % px track-lost threshold
 Z_TRACK   = -1.1;   % height [m NED]
 
 err_mag = hypot(x_err, y_err);
@@ -34,8 +34,11 @@ if takeoff_flag && err_mag > ERR_MIN
     bearing_body = atan2(y_err, x_err);
     % smoothed "guide" direction (wrap-safe EMA) - absorbs detector flips
     d = atan2(sin(bearing_body - bearing_smooth), cos(bearing_body - bearing_smooth));
-    bearing_smooth = bearing_smooth + B_ALPHA * d;
-
+    if abs(d) > (pi / 2)
+        bearing_smooth = bearing_body; % *** หันเป้าหมายไปด้านหลังทันที ***
+    else
+        bearing_smooth = bearing_smooth + B_ALPHA * d; % สมูทตามปกติ
+    end
     % corner slow-down (no yaw): shorten look-ahead so the crab settles in
     if abs(bearing_smooth) > TH_SLOW
         v = L_SLOW;
