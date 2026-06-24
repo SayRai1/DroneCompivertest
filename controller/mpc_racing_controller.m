@@ -19,11 +19,11 @@ x_est=double(x_est); y_est=double(y_est); takeoff_flag=double(takeoff_flag);
 LOOKAHEAD = 0.12;
 L_SLOW    = 0.11;
 TH_SLOW   = deg2rad(18);
-B_ALPHA   = 0.20;
+B_ALPHA   = 0.60;
 ERR_MIN   = 0.3;
 Z_TRACK   = -1.1;
-V_MIN     = 0.05;   % m/s : ใช้ velocity ก็ต่อเมื่อบินจริงๆ (ไม่ใช่ hover noise)
-TH_REV    = pi/2;   % bearing ห่างจากทิศบินจริงเกินนี้ = ย้อน -> flip
+V_MIN     = 0.06;   % m/s : ใช้ velocity ก็ต่อเมื่อบินจริงๆ (ไม่ใช่ hover noise)
+TH_REV    = pi/2 +0.2;   % bearing ห่างจากทิศบินจริงเกินนี้ = ย้อน -> flip
 
 err_mag = hypot(x_err, y_err);
 if takeoff_flag && err_mag > ERR_MIN
