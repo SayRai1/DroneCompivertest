@@ -1,30 +1,31 @@
 function [error_y_track, error_x_track, orientation_track, flag_track] = ...
 error_pixel_generator(frame, x_ref_prev, y_ref_prev, flag_track_prev, ...
 MIN_RADIUS_CROWN, MAX_RADIUS_CROWN, FOV, COG_X, COG_Y)
-% LINE-TRACING detector (connected + predictive).
+% LINE-TRACING detector (connected + predictive) + COMMITTED-DIRECTION guard.
 %
-% Instead of "pick an arm by angle", it MARCHES along the connected line:
-% starting at the drone centre, heading = the previous lane direction, it steps
-% forward and at each step snaps to the local line and rotates its heading to
-% follow the line's curve.  Because it walks ALONG one connected line:
-%   - it never jumps to a different (disconnected) arm  -> no fork flipping
-%   - it follows the line wherever it bends, incl. backward (the heading rotates
-%     with the line; only a near-full reversal > TURN_MAX is blocked)
-% The "lock" persists through the model feedback (orientation_track comes from
-% the previous output via the z^-1 blocks).  I/O identical to the block.
-%
-% paste over the whole "waypoints 1" block body.
+% Marches along the connected line from the drone, heading rotates to follow the
+% line's curve.  A PERSISTENT committed travel direction (cdir) seeds the march
+% and is updated each frame but SLEW-LIMITED (max MAX_SLEW per frame) so the
+% travel direction stays CONTINUOUS:
+%   - a gradual bend (incl. backward) is followed  (cdir rotates over frames)
+%   - a sudden 180 deg reversal onto the came-from arm is BLOCKED (cdir can't
+%     flip in one frame) -> the drone no longer runs back the way it came.
+% I/O identical to the block.  paste over the whole "waypoints 1" block body.
 
 %#codegen
 
+persistent cdir cinit
+if isempty(cdir);  cdir  = 0.0; end
+if isempty(cinit); cinit = 0.0; end
+
 % ── parameters ────────────────────────────────────────────────────────────
 STEP_LEN = 2.0;    % march step length [px]
-N_STEP   = 12;     % number of steps  (look-ahead ~= STEP_LEN*N_STEP px)
-WIN_R    = 4;      % search half-window around each step [px]
-TURN_MAX = 2.36;   % rad ~135deg : max turn per step (blocks only the ~back)
-DIR_LP   = 0.5;    % heading low-pass per step (1 = snap hard to local line)
+N_STEP   = 12;     % steps (look-ahead ~= STEP_LEN*N_STEP px)
+WIN_R    = 15;      % search half-window around each step [px]   (15 กว้างไป->โดนแขนหลัง)
+TURN_MAX = 2.4;    % rad ~137deg : ตามโค้งได้ แต่ตัดทางหลัง(180°)ทิ้ง
+DIR_LP   = 0.20;   % heading low-pass per step                   (พี่จูน)
+MAX_SLEW = 0.80;   % rad/frame : max change of committed dir (กันย้อน - ลดถ้ายังย้อน)
 
-% lane heading from the previous tracking point (= march seed, and an output)
 orientation_track = atan2(-x_ref_prev, y_ref_prev);
 orientation_track = mod(orientation_track, 2*pi);
 
@@ -35,7 +36,8 @@ error_y_track = 0;
 flag_track    = false;
 
 if flag_track_prev == 0
-    % ── INITIAL acquisition: plain crown-ring centroid (detect line @ takeoff)
+    % ── INITIAL acquisition: crown-ring centroid + reseed committed dir ───
+    cinit = 0.0;
     sumi = 0.0; sumj = 0.0; cnt = 0.0;
     for i = (COG_X-MAX_RADIUS_CROWN):(COG_X+MAX_RADIUS_CROWN)
         for j = (COG_Y-MAX_RADIUS_CROWN):(COG_Y+MAX_RADIUS_CROWN)
@@ -54,22 +56,25 @@ if flag_track_prev == 0
     end
 
 else
-    % ── MARCH along the connected line ────────────────────────────────────
-    ci   = COG_X - 0.5;          % current march position (row, col)
-    cj   = COG_Y - 0.5;
-    mdir = orientation_track;    % start heading = previous lane direction
-    nf   = 0.0;
+    % ── seed committed direction (first locked frame) ─────────────────────
+    if cinit == 0.0
+        cdir  = orientation_track;
+        cinit = 1.0;
+    end
 
+    % ── MARCH along the connected line, starting from the committed dir ───
+    ci = COG_X - 0.5;
+    cj = COG_Y - 0.5;
+    mdir = cdir;
+    nf = 0.0;
     for s = 1:N_STEP
-        % candidate point one step ahead along the current heading
         ti = ci + STEP_LEN*sin(mdir);
         tj = cj + STEP_LEN*cos(mdir);
-        % centroid of line pixels in the window that lie in the forward cone
         sumi = 0.0; sumj = 0.0; cnt = 0.0;
         for ii = floor(ti-WIN_R):ceil(ti+WIN_R)
             for jj = floor(tj-WIN_R):ceil(tj+WIN_R)
                 if ii>=1 && ii<=imax && jj>=1 && jj<=jmax && frame(ii,jj)==1
-                    ang = atan2(ii-ci, jj-cj);                 % current pos -> pixel
+                    ang = atan2(ii-ci, jj-cj);
                     dev = abs(atan2(sin(ang-mdir), cos(ang-mdir)));
                     if dev <= TURN_MAX
                         sumi = sumi+ii; sumj = sumj+jj; cnt = cnt+1.0;
@@ -78,12 +83,12 @@ else
             end
         end
         if cnt < 1.0
-            break;                          % line ended ahead -> stop
+            break;
         end
-        ni = sumi/cnt; nj = sumj/cnt;        % local line centre
-        nd = atan2(ni-ci, nj-cj);            % heading toward it
-        mdir = mdir + DIR_LP*atan2(sin(nd-mdir), cos(nd-mdir));   % rotate to follow
-        ci = ni; cj = nj;                    % advance along the line
+        ni = sumi/cnt; nj = sumj/cnt;
+        nd = atan2(ni-ci, nj-cj);
+        mdir = mdir + DIR_LP*atan2(sin(nd-mdir), cos(nd-mdir));
+        ci = ni; cj = nj;
         nf = nf + 1.0;
     end
 
@@ -91,6 +96,12 @@ else
         error_x_track = -(round(ci) - COG_X);
         error_y_track =  (round(cj) - COG_Y);
         flag_track    = true;
+        % update committed direction toward the look-ahead, SLEW-LIMITED
+        net = atan2(ci-(COG_X-0.5), cj-(COG_Y-0.5));
+        dn  = atan2(sin(net-cdir), cos(net-cdir));
+        if dn >  MAX_SLEW; dn =  MAX_SLEW; end
+        if dn < -MAX_SLEW; dn = -MAX_SLEW; end
+        cdir = cdir + dn;
     end
 end
 
