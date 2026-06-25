@@ -22,15 +22,15 @@ vx=double(vx); vy=double(vy);
 x_est=double(x_est); y_est=double(y_est); takeoff_flag=double(takeoff_flag);
 
 LOOKAHEAD = 0.12;
-L_SLOW    = 0.12;
+L_SLOW    = 0.11;
 TH_SLOW   = deg2rad(18);
-B_ALPHA   = 0.60;
+B_ALPHA   = 0.65;
 ERR_MIN   = 0.2;
 Z_TRACK   = -1.1;
-V_MIN     = 0.07;   % m/s : ใช้ velocity ก็ต่อเมื่อบินจริงๆ (ไม่ใช่ hover noise)
-TH_REV    = pi/2 +0.2;   % bearing ห่างจากทิศบินจริงเกินนี้ = ย้อน -> flip
-LAND_WAIT = 200;         % 200 frames = 1s @200Hz ก่อนเริ่มลง
-DESCENT   = 0.005;     % m/frame ≈ 0.15 m/s descent
+V_MIN     = 0.12;   % m/s : ใช้ velocity ก็ต่อเมื่อบินจริงๆ (ไม่ใช่ hover noise)
+TH_REV    = pi/2 + 0.2;   % bearing ห่างจากทิศบินจริงเกินนี้ = ย้อน -> flip
+LAND_WAIT = 290;         % 200 frames = 1s @200Hz ก่อนเริ่มลง
+DESCENT   = 0.00075;     % m/frame ≈ 0.15 m/s descent
 
 err_mag = hypot(x_err, y_err);
 if takeoff_flag && err_mag > ERR_MIN
@@ -55,11 +55,12 @@ if takeoff_flag && err_mag > ERR_MIN
     d = atan2(sin(bearing_body - bearing_smooth), cos(bearing_body - bearing_smooth));
     if abs(d) > (pi/2)
         bearing_smooth = bearing_body;
+        v = 0.03;
     else
         bearing_smooth = bearing_smooth + B_ALPHA * d;
+        v = LOOKAHEAD;
+        if abs(bearing_smooth) > TH_SLOW; v = L_SLOW; end
     end
-    v = LOOKAHEAD;
-    if abs(bearing_smooth) > TH_SLOW; v = L_SLOW; end
     bearing_ned = psi + bearing_smooth;
     x_planned   = x_est + v*cos(bearing_ned);
     y_planned   = y_est + v*sin(bearing_ned);
@@ -71,9 +72,11 @@ else
     x_planned=x_est; y_planned=y_est; yaw_planned=psi;
     bearing_smooth=0.0;
     if takeoff_flag > 0.5 && was_tracking > 0.5
-        z_cmd = 0.0;
+        land_cnt = land_cnt + 1;
     end
 end
-
+if land_cnt > LAND_WAIT
+    z_cmd = min(z_cmd + DESCENT, 0.0);
+end
 z_planned = z_cmd;
 end
