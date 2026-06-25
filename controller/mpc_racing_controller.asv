@@ -10,20 +10,27 @@ function [x_planned, y_planned, z_planned, yaw_planned] = mpc_racing_controller(
 %
 % ใช้ ground-truth ของการเคลื่อนที่จริง ไม่ใช่ภาพ -> ไม่หลอกด้วย back-bend
 %#codegen
-persistent bearing_smooth
-if isempty(bearing_smooth); bearing_smooth = 0.0; end
+persistent bearing_smooth was_tracking land_cnt z_cmd
+if isempty(bearing_smooth)
+    bearing_smooth = 0.0;
+    was_tracking = 0;
+    land_cnt = 0;
+    z_cmd = -1.1;
+end
 x_err=double(x_err); y_err=double(y_err); psi=double(psi);
 vx=double(vx); vy=double(vy);
 x_est=double(x_est); y_est=double(y_est); takeoff_flag=double(takeoff_flag);
 
-LOOKAHEAD = 0.13;
-L_SLOW    = 0.11;
-TH_SLOW   = deg2rad(17);
+LOOKAHEAD = 0.12;
+L_SLOW    = 0.12;
+TH_SLOW   = deg2rad(18);
 B_ALPHA   = 0.60;
-ERR_MIN   = 0.3;
+ERR_MIN   = 0.2;
 Z_TRACK   = -1.1;
-V_MIN     = 0.7;   % m/s : ใช้ velocity ก็ต่อเมื่อบินจริงๆ (ไม่ใช่ hover noise)
+V_MIN     = 0.07;   % m/s : ใช้ velocity ก็ต่อเมื่อบินจริงๆ (ไม่ใช่ hover noise)
 TH_REV    = pi/2 +0.2;   % bearing ห่างจากทิศบินจริงเกินนี้ = ย้อน -> flip
+LAND_WAIT = 200;         % 200 frames = 1s @200Hz ก่อนเริ่มลง
+DESCENT   = 0.004;     % m/frame ≈ 0.15 m/s descent
 
 err_mag = hypot(x_err, y_err);
 if takeoff_flag && err_mag > ERR_MIN
@@ -57,9 +64,18 @@ if takeoff_flag && err_mag > ERR_MIN
     x_planned   = x_est + v*cos(bearing_ned);
     y_planned   = y_est + v*sin(bearing_ned);
     yaw_planned = psi;
+    was_tracking = 1;
+    land_cnt = 0;
+    z_cmd = Z_TRACK;
 else
     x_planned=x_est; y_planned=y_est; yaw_planned=psi;
     bearing_smooth=0.0;
+    if takeoff_flag > 0.5 && was_tracking > 0.5
+        land_cnt = land_cnt + 1;
+    end
 end
-z_planned = Z_TRACK;
+if land_cnt > LAND_WAIT
+    z_cmd = min(z_cmd + DESCENT, 0.0);
+end
+z_planned = z_cmd;
 end
